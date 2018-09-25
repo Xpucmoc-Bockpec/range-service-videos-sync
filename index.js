@@ -17,7 +17,7 @@ const Consumer = client
 
 /*
 	После того, как получили инфу о видео via YouTube API,
-	добавляем в очередь обработтаных видеозаписей
+	добавляем в очередь обработанных видеозаписей
 */
 const Publisher = client
 	.then(connection => connection.createChannel())
