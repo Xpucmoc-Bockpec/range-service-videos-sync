@@ -67,7 +67,7 @@ async function processMessages(messages, consumerChannel, publisherChannel) {
 		
 		if (!recievedVideoInfo || recievedVideoInfo.status.uploadStatus === "failed") {
 			const videoInfoMessage = { 
-				id, 
+				id: video.id, 
 				removed: true 
 			};
 					
