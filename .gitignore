@@ -1,2 +1,2 @@
-pm2.json
+ecosystem.config.js
 /node_modules/

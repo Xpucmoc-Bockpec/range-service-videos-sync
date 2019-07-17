@@ -2,12 +2,16 @@ const amqp = require("amqplib");
 const https = require("https");
 const ISODuration = require("iso8601-duration");
 
-const queueUnprocessed = "unprocessed-youtube-videos";
-const queueProcessed = "processed-youtube-videos";
-const VIDEOS_CHUNK_SIZE = 10;
+const {
+	YOUTUBE_API_KEY,
+	VIDEOS_CHUNK_SIZE = 10,
+	RABBIT_URL,
+	RABBIT_UNPROCESSED_QUEUE_NAME,
+	RABBIT_PROCESSED_QUEUE_NAME
+} = process.env;
 
 const state = {
-	connection: amqp.connect(`amqp://${process.env.username}:${process.env.password}@${process.env.hostname}:${process.env.port}`),
+	connection: amqp.connect(RABBIT_URL),
 	publisher: null,
 	consumer: null
 };
@@ -15,14 +19,14 @@ const state = {
 (async function() {
 	state.consumer = await createChannel()
 		.then(async channel => {
-			await channel.assertQueue(queueUnprocessed, { durable: true });
+			await channel.assertQueue(RABBIT_UNPROCESSED_QUEUE_NAME, { durable: true });
 			await channel.prefetch(VIDEOS_CHUNK_SIZE);
 			return channel;
 		});
 		
 	state.publisher = await createChannel()
 		.then(async channel => {
-			await channel.assertQueue(queueProcessed);
+			await channel.assertQueue(RABBIT_PROCESSED_QUEUE_NAME);
 			return channel;
 		});
 
@@ -33,7 +37,7 @@ async function getVideosChunk() {
 	const chunk = [];
 	
 	for (let i = 0; i < VIDEOS_CHUNK_SIZE; i++) {
-		const message = await state.consumer.get(queueUnprocessed);
+		const message = await state.consumer.get(RABBIT_UNPROCESSED_QUEUE_NAME);
 		
 		if (!message) break;
 		chunk.push({
@@ -53,14 +57,14 @@ async function processVideosChunk(chunk) {
 		const { status, contentDetails, snippet } = youTubeMeta.find(d => d.id === parsedMessage.youTubeId) || {}; // YouTube API ignores videos removed due to duplicate
 		
 		if (!status || status.uploadStatus === "failed") {
-			await state.publisher.sendToQueue(queueProcessed, {
+			await state.publisher.sendToQueue(RABBIT_PROCESSED_QUEUE_NAME, {
 				id: parsedMessage.id,
 				removed: true
 			});
 			await state.consumer.ack(rawMessage);
 		}
 		else if (status.uploadStatus === "processed") {
-			await state.publisher.sendToQueue(queueProcessed, {
+			await state.publisher.sendToQueue(RABBIT_PROCESSED_QUEUE_NAME, {
 				id: parsedMessage.id,
 				duration: ISODuration.toSeconds(ISODuration.parse(contentDetails.duration)),
 				thumbnails: snippet.thumbnails
@@ -77,7 +81,7 @@ function getVideosData(videoIds) {
 		method: "GET",
 		hostname: "www.googleapis.com",
 		port: 443,
-		path: `/youtube/v3/videos?id=${videoIds.join(",")}&key=${process.env.apiKey}&part=status,snippet,contentDetails`
+		path: `/youtube/v3/videos?id=${videoIds.join(",")}&key=${YOUTUBE_API_KEY}&part=status,snippet,contentDetails`
 	};
 	
 	return new Promise((resolve, reject) => {
