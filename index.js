@@ -4,23 +4,24 @@ const ISODuration = require("iso8601-duration");
 
 const {
 	YOUTUBE_API_KEY,
-	VIDEOS_CHUNK_SIZE = 10,
+	VIDEOS_CHUNK_SIZE,
 	RABBIT_URL,
 	RABBIT_UNPROCESSED_QUEUE_NAME,
 	RABBIT_PROCESSED_QUEUE_NAME
 } = process.env;
 
 const state = {
-	connection: amqp.connect(RABBIT_URL),
+	connection: null,
 	publisher: null,
 	consumer: null
 };
 
 (async function() {
+	state.connection = await amqp.connect(RABBIT_URL);
 	state.consumer = await createChannel()
 		.then(async channel => {
 			await channel.assertQueue(RABBIT_UNPROCESSED_QUEUE_NAME, { durable: true });
-			await channel.prefetch(VIDEOS_CHUNK_SIZE);
+			await channel.prefetch(+VIDEOS_CHUNK_SIZE);
 			return channel;
 		});
 		
@@ -36,7 +37,7 @@ const state = {
 async function getVideosChunk() {
 	const chunk = [];
 	
-	for (let i = 0; i < VIDEOS_CHUNK_SIZE; i++) {
+	for (let i = 0; i < +VIDEOS_CHUNK_SIZE; i++) {
 		const message = await state.consumer.get(RABBIT_UNPROCESSED_QUEUE_NAME);
 		
 		if (!message) break;
@@ -105,7 +106,7 @@ function getVideosData(videoIds) {
 }
 
 async function createChannel() {
-	const chanel = await state.connection.createChannel();
+	const channel = await state.connection.createChannel();
 	const sendToQueue = channel.sendToQueue.bind(channel);
 	channel.sendToQueue = (queue, content, sendToQueueOptions) => sendToQueue(queue, Buffer.from(JSON.stringify(content)), sendToQueueOptions);
 	
