@@ -6,90 +6,74 @@ const queueUnprocessed = "unprocessed-youtube-videos";
 const queueProcessed = "processed-youtube-videos";
 const MAX_VIDEOS_COUNT = 10;
 
+const state = {
+	connection: amqp.connect(`amqp://${process.env.username}:${process.env.password}@${process.env.hostname}:${process.env.port}`),
+	publisher: null,
+	consumer: null
+};
 
-const client = amqp.connect(`amqp://${process.env.username}:${process.env.password}@${process.env.hostname}:${process.env.port}`);
-
-/*
-	Получает сообщения { id: objectid, youTubeId: string }
-*/
-const Consumer = client
-	.then(connection => connection.createChannel());
-
-/*
-	После того, как получили инфу о видео via YouTube API,
-	добавляем в очередь обработанных видеозаписей
-*/
-const Publisher = client
-	.then(connection => connection.createChannel())
-	.then(async channel => {
-		await channel.assertQueue(queueProcessed);
-		return channel;
-	});
-	
-
-Promise
-	.all([ Consumer, Publisher ])
-	.then(async ([ consumerChannel, publisherChannel ]) => {
-		await consumerChannel
-			.assertQueue(queueUnprocessed, { durable: true })
-			.then(() => consumerChannel.prefetch(MAX_VIDEOS_COUNT));
-
-		// тупа ебашим на заводи
-		setInterval(async () => {	
-			let messages = [];
-			
-			for (let i = 0; i < MAX_VIDEOS_COUNT; i++) {
-				const message = await consumerChannel.get(queueUnprocessed);
-				if (!message) break;
-				messages.push(message);
-			}
-			
-			if (messages.length !== 0) {
-				await processMessages(messages, consumerChannel, publisherChannel);
-			}
-		}, 3000);
-	});
-
-
-async function processMessages(messages, consumerChannel, publisherChannel) {
-	const videoIds = [];
-	
-	for (const message of messages) {
-		const video = JSON.parse(message.content.toString());
-		videoIds.push(video.youTubeId);
-	}
-	
-	const recievedVideosInfo = await getVideosInfo(videoIds);
-	for (const message of messages) {
-		const video = JSON.parse(message.content.toString());
-		// гугл не возвращает в массиве видео, которые удалены из-за копии, хотя обычно ставит им статус failed
-		const recievedVideoInfo = recievedVideosInfo.find(d => d.id === video.youTubeId); 
+(async function() {
+	state.consumer = await createChannel()
+		.then(async channel => {
+			await channel.assertQueue(queueUnprocessed, { durable: true });
+			await channel.prefetch(MAX_VIDEOS_COUNT);
+			return channel;
+		});
 		
-		if (!recievedVideoInfo || recievedVideoInfo.status.uploadStatus === "failed") {
-			const videoInfoMessage = { 
-				id: video.id, 
-				removed: true 
-			};
-					
-			await publisherChannel.sendToQueue(queueProcessed, Buffer.from(JSON.stringify(videoInfoMessage)));
-			await consumerChannel.ack(message);
-		}
-		else if (recievedVideoInfo.status.uploadStatus === "processed") {
-			const videoInfoMessage = {
+	state.publisher = await createChannel()
+		.then(async channel => {
+			await channel.assertQueue(queueProcessed);
+			return channel;
+		});
+
+	setInterval(async () => await getQueuedVideos(), 3000);
+})();
+
+async function getQueuedVideos() {
+	const messages = [];
+	
+	for (let i = 0; i < MAX_VIDEOS_COUNT; i++) {
+		const message = await state.consumer.get(queueUnprocessed);
+		
+		if (!message) break;
+		messages.push({
+			parsedData: JSON.parse(message.toString()),
+			rawMessage
+		});
+	}
+
+	await processVideos(messages);
+}
+
+async function processVideos(messages) {
+	const videoIds = messages.map(({ parsedData }) => parsedData.youTubeId);
+	const youTubeMeta = await getVideosData(videoIds);
+	
+	for (const message of messages) {
+		const { video, rawMessage } = message;
+		const { status, contentDetails, snippet } = youTubeMeta.find(d => d.id === video.youTubeId) || {}; // YouTube API ignores videos removed due to duplicate
+		
+		if (!status || status.uploadStatus === "failed") {
+			await state.publisher.sendToQueue(queueProcessed, {
 				id: video.id,
-				duration: ISODuration.toSeconds(ISODuration.parse(recievedVideoInfo.contentDetails.duration)),
-				thumbnails: recievedVideoInfo.snippet.thumbnails	
-			};
-				
-			await publisherChannel.sendToQueue(queueProcessed, Buffer.from(JSON.stringify(videoInfoMessage)));
-			await consumerChannel.ack(message);
+				removed: true
+			});
+			await state.consumer.ack(message);
 		}
-		else await consumerChannel.nack(message);
+		else if (status.uploadStatus === "processed") {
+			await state.publisher.sendToQueue(queueProcessed, {
+				id: video.id,
+				duration: ISODuration.toSeconds(ISODuration.parse(contentDetails.duration)),
+				thumbnails: snippet.thumbnails
+			});
+			await state.consumer.ack(message);
+		}
+		else await state.consumer.nack(message);
 	}
 }
 		
 		
-function getVideosInfo(videoIds) {
+function getVideosData(videoIds) {
 	const options = {
 		method: "GET",
 		hostname: "www.googleapis.com",
@@ -101,10 +85,7 @@ function getVideosInfo(videoIds) {
 		let response = "";
 		
 		const request = https.request(options, (res) => {
-			res.on("data", (data) => {
-				response += data
-			});
-			
+			res.on("data", data => (response += data));
 			res.on("end", () => {
 				try {
 					resolve(JSON.parse(response).items);
@@ -118,5 +99,13 @@ function getVideosInfo(videoIds) {
 		request.on("error", () => reject("не удалось завершить запрос к youtube api"));
 		request.end();
 	});
+}
+
+async function createChannel() {
+	const chanel = await state.connection.createChannel();
+	const sendToQueue = channel.sendToQueue.bind(channel);
+	channel.sendToQueue = (queue, content, sendToQueueOptions) => sendToQueue(queue, Buffer.from(JSON.stringify(content)), sendToQueueOptions);
+	
+	return channel;
 }
 
