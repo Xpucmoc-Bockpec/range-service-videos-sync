@@ -4,7 +4,7 @@ const ISODuration = require("iso8601-duration");
 
 const queueUnprocessed = "unprocessed-youtube-videos";
 const queueProcessed = "processed-youtube-videos";
-const MAX_VIDEOS_COUNT = 10;
+const VIDEOS_CHUNK_SIZE = 10;
 
 const state = {
 	connection: amqp.connect(`amqp://${process.env.username}:${process.env.password}@${process.env.hostname}:${process.env.port}`),
@@ -16,7 +16,7 @@ const state = {
 	state.consumer = await createChannel()
 		.then(async channel => {
 			await channel.assertQueue(queueUnprocessed, { durable: true });
-			await channel.prefetch(MAX_VIDEOS_COUNT);
+			await channel.prefetch(VIDEOS_CHUNK_SIZE);
 			return channel;
 		});
 		
@@ -26,49 +26,48 @@ const state = {
 			return channel;
 		});
 
-	setInterval(async () => await getQueuedVideos(), 3000);
+	setInterval(async () => await getVideosChunk(), 3000);
 })();
 
-async function getQueuedVideos() {
-	const messages = [];
+async function getVideosChunk() {
+	const chunk = [];
 	
-	for (let i = 0; i < MAX_VIDEOS_COUNT; i++) {
+	for (let i = 0; i < VIDEOS_CHUNK_SIZE; i++) {
 		const message = await state.consumer.get(queueUnprocessed);
 		
 		if (!message) break;
-		messages.push({
-			parsedData: JSON.parse(message.toString()),
+		chunk.push({
+			parsedMessage: JSON.parse(message.toString()),
 			rawMessage
 		});
 	}
 
-	await processVideos(messages);
+	await processVideosChunk(chunk);
 }
 
-async function processVideos(messages) {
-	const videoIds = messages.map(({ parsedData }) => parsedData.youTubeId);
+async function processVideosChunk(chunk) {
+	const videoIds = chunk.map(({ parsedMessage }) => parsedMessage.youTubeId);
 	const youTubeMeta = await getVideosData(videoIds);
 	
-	for (const message of messages) {
-		const { video, rawMessage } = message;
-		const { status, contentDetails, snippet } = youTubeMeta.find(d => d.id === video.youTubeId) || {}; // YouTube API ignores videos removed due to duplicate
+	for (const { parsedMessage, rawMessage } of chunk) {
+		const { status, contentDetails, snippet } = youTubeMeta.find(d => d.id === parsedMessage.youTubeId) || {}; // YouTube API ignores videos removed due to duplicate
 		
 		if (!status || status.uploadStatus === "failed") {
 			await state.publisher.sendToQueue(queueProcessed, {
-				id: video.id,
+				id: parsedMessage.id,
 				removed: true
 			});
-			await state.consumer.ack(message);
+			await state.consumer.ack(rawMessage);
 		}
 		else if (status.uploadStatus === "processed") {
 			await state.publisher.sendToQueue(queueProcessed, {
-				id: video.id,
+				id: parsedMessage.id,
 				duration: ISODuration.toSeconds(ISODuration.parse(contentDetails.duration)),
 				thumbnails: snippet.thumbnails
 			});
-			await state.consumer.ack(message);
+			await state.consumer.ack(rawMessage);
 		}
-		else await state.consumer.nack(message);
+		else await state.consumer.nack(rawMessage);
 	}
 }
 		
@@ -91,12 +90,12 @@ function getVideosData(videoIds) {
 					resolve(JSON.parse(response).items);
 				}
 				catch (e) {
-					reject("youtube api отправил некорректный ответ");
+					reject(`Invalid YouTube API response:\n\t${response}`);
 				}
 			});
 		});
 		
-		request.on("error", () => reject("не удалось завершить запрос к youtube api"));
+		request.on("error", error => reject(`Failed to fetch YouTube API:\n\t${error}`));
 		request.end();
 	});
 }
