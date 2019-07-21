@@ -38,16 +38,21 @@ async function getVideosChunk() {
   const chunk = [];
   
   for (let i = 0; i < +VIDEOS_CHUNK_SIZE; i++) {
-    const message = await state.consumer.get(RABBIT_UNPROCESSED_QUEUE_NAME);
+    const rawMessage = await state.consumer.get(RABBIT_UNPROCESSED_QUEUE_NAME);
     
-    if (!message) break;
+    if (!rawMessage) break;
     chunk.push({
-      parsedMessage: JSON.parse(message.toString()),
+      parsedMessage: JSON.parse(rawMessage.content.toString()),
       rawMessage
     });
   }
 
-  await processVideosChunk(chunk);
+  try {
+    await processVideosChunk(chunk);
+  }
+  catch (e) {
+    console.error(e);
+  }
 }
 
 async function processVideosChunk(chunk) {
@@ -91,12 +96,15 @@ function getVideosData(videoIds) {
     const request = https.request(options, (res) => {
       res.on("data", data => (response += data));
       res.on("end", () => {
-        try {
-          resolve(JSON.parse(response).items);
+        const responseJSON = JSON.parse(response);
+        
+        if (res.statusCode !== 200) {
+          if (responseJSON.error && responseJSON.error.errors.every(e => e.domain === "usageLimits")) {
+            reject("YouTube API daily usage limit reached");
+          }
+          reject(`YouTube API Error:\n\t${response}`);
         }
-        catch (e) {
-          reject(`Invalid YouTube API response:\n\t${response}`);
-        }
+        resolve(responseJSON.items);
       });
     });
     
@@ -112,4 +120,3 @@ async function createChannel() {
   
   return channel;
 }
-
