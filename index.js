@@ -56,6 +56,7 @@ async function getVideosChunk() {
 }
 
 async function processVideosChunk(chunk) {
+  if (!chunk.length) return;
   const videoIds = chunk.map(({ parsedMessage }) => parsedMessage.youTubeId);
   const youTubeMeta = await getVideosData(videoIds);
   
